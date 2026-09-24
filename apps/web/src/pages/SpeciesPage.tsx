@@ -45,6 +45,39 @@ export function SpeciesPage() {
         </div>
       </section>
 
+      {detail.data.archive && (
+        <section className="document-section">
+          <div className="section-heading">
+            <div><p className="eyebrow">ARCHIVE STAGES</p><h2>档案阶段</h2></div>
+            <span className={`status-pill ${detail.data.archive.unlocked ? 'status-stable' : ''}`}>
+              {detail.data.archive.unlocked
+                ? `已解锁阶段 ${detail.data.archive.stage} / {detail.data.archive.maxStage}`
+                : '档案未解锁'}
+            </span>
+          </div>
+          <dl className="dossier-facts archive-metrics">
+            <div><dt>观察次数</dt><dd>{detail.data.archive.progress.observations}</dd></div>
+            <div><dt>采样记录</dt><dd>{detail.data.archive.progress.samples}</dd></div>
+            <div><dt>区域可及</dt><dd>{detail.data.archive.progress.sites}</dd></div>
+            <div><dt>保护状态</dt><dd>{detail.data.archive.progress.statuses}</dd></div>
+          </dl>
+          <div className="archive-goals">
+            {detail.data.archive.goals.map((goal) => (
+              <article key={goal.stage} className={goal.met ? 'archive-goal archive-goal-met' : 'archive-goal'}>
+                <strong>阶段 {goal.stage} · {goal.label}</strong>
+                <span>
+                  观察 {Math.min(detail.data.archive!.progress.observations, goal.requirements.observations)}/{goal.requirements.observations}
+                  {' · '}采样 {Math.min(detail.data.archive!.progress.samples, goal.requirements.samples)}/{goal.requirements.samples}
+                  {' · '}区域 {Math.min(detail.data.archive!.progress.sites, goal.requirements.sites)}/{goal.requirements.sites}
+                  {' · '}状态 {Math.min(detail.data.archive!.progress.statuses, goal.requirements.statuses)}/{goal.requirements.statuses}
+                </span>
+                <small>{goal.met ? '已解锁' : '未达成'}</small>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+
       <section className="document-section">
         <div className="section-heading">
           <div><p className="eyebrow">CURRENT DISTRIBUTION</p><h2>当前区域状态</h2></div>

@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS saves (
   year_start_species_json TEXT NOT NULL,
   year_start_sites_json TEXT NOT NULL,
   restoration_unlocked INTEGER NOT NULL DEFAULT 0,
+  archive_synced INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -118,6 +119,14 @@ CREATE TABLE IF NOT EXISTS samples (
 
 CREATE INDEX IF NOT EXISTS idx_samples_save_season
   ON samples(save_id, year, season, species_id, method);
+
+CREATE TABLE IF NOT EXISTS species_archive_unlocks (
+  save_id TEXT NOT NULL REFERENCES saves(id) ON DELETE CASCADE,
+  species_id TEXT NOT NULL,
+  stage INTEGER NOT NULL,
+  unlocked_at TEXT NOT NULL,
+  PRIMARY KEY (save_id, species_id, stage)
+);
 
 CREATE TABLE IF NOT EXISTS season_summaries (
   id TEXT PRIMARY KEY,

@@ -7,6 +7,7 @@ import type {
   JournalEntry,
   Season,
   SiteId,
+  SpeciesArchiveSummary,
   SpeciesSnapshot,
   WorldSnapshot
 } from '@shanhai/contracts';
@@ -86,6 +87,7 @@ export const api = {
         sampleProtocol: string[];
         colors: Record<string, string>;
       };
+      archive: SpeciesArchiveSummary | null;
       states: Array<SpeciesSnapshot & { siteId: SiteId; siteName: string }>;
       observations: Array<{
         id: string;

@@ -20,6 +20,10 @@ export class Store {
     if (!columns.some((column) => column.name === 'slot')) {
       this.db.exec('ALTER TABLE samples ADD COLUMN slot INTEGER NOT NULL DEFAULT 1');
     }
+    const saveColumns = this.db.prepare('PRAGMA table_info(saves)').all() as unknown as Array<{ name: string }>;
+    if (!saveColumns.some((column) => column.name === 'archive_synced')) {
+      this.db.exec('ALTER TABLE saves ADD COLUMN archive_synced INTEGER NOT NULL DEFAULT 0');
+    }
   }
 
   transaction<T>(operation: () => T): T {

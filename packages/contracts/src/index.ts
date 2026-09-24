@@ -145,6 +145,33 @@ export interface SpeciesSnapshot {
   unlocked: boolean;
 }
 
+export interface ArchiveStageGoal {
+  stage: number;
+  key: string;
+  label: string;
+  requirements: {
+    observations: number;
+    samples: number;
+    sites: number;
+    statuses: number;
+  };
+  met: boolean;
+}
+
+export interface SpeciesArchiveSummary {
+  speciesId: string;
+  stage: number;
+  maxStage: number;
+  unlocked: boolean;
+  progress: {
+    observations: number;
+    samples: number;
+    sites: number;
+    statuses: number;
+  };
+  goals: ArchiveStageGoal[];
+}
+
 export interface RecentEvent {
   id: string;
   sequence: number;
@@ -194,6 +221,7 @@ export interface WorldSnapshot {
   currentSiteId: SiteId;
   restorationUnlocked: boolean;
   sites: SiteSnapshot[];
+  archives: SpeciesArchiveSummary[];
   recentEvents: RecentEvent[];
   seasonReview: SeasonReview | null;
   annualReview: AnnualReview | null;

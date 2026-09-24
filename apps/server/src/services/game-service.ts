@@ -9,6 +9,7 @@ import type {
   Season,
   SeasonReview,
   SiteId,
+  SpeciesArchiveSummary,
   SpeciesSnapshot,
   WorldSnapshot
 } from '@shanhai/contracts';
@@ -16,12 +17,16 @@ import { SEASON_LABELS } from '@shanhai/contracts';
 import {
   applyOverwinter,
   applySampleEffects,
+  ARCHIVE_MAX_STAGE,
   CATALOG_VERSION,
   createSpeciesState,
   disperseSpecies,
+  emptyArchiveProgress,
+  evaluateArchiveStage,
   evaluateSample,
   evolveSeason,
   generateSiteState,
+  getArchiveStageGoals,
   getPhenologyWindow,
   getPlantPresentation,
   getStatus,
@@ -31,6 +36,7 @@ import {
   SPECIES_BY_ID,
   SITES,
   SITES_BY_ID,
+  type ArchiveProgress,
   type SiteState,
   type SpeciesState
 } from '@shanhai/game-core';
@@ -53,6 +59,7 @@ interface SaveRecord {
   year_start_species_json: string;
   year_start_sites_json: string;
   restoration_unlocked: number;
+  archive_synced: number;
   created_at: string;
   updated_at: string;
 }
@@ -97,6 +104,13 @@ interface EventDraft {
   message: string;
   effects: string[];
   payload: Record<string, unknown>;
+}
+
+interface ArchiveUnlock {
+  speciesId: string;
+  speciesName: string;
+  stage: number;
+  label: string;
 }
 
 interface CommandOutcome {
@@ -178,8 +192,8 @@ export class GameService {
           `INSERT INTO saves (
             id, session_id, seed, revision, year, season, day, slot, action_points, phase,
             current_site_id, year_start_species_json, year_start_sites_json,
-            restoration_unlocked, created_at, updated_at
-          ) VALUES (?, ?, ?, 0, 1, 'spring', 1, 1, 30, 'active', 'foothill', '[]', '[]', 0, ?, ?)`
+            restoration_unlocked, archive_synced, created_at, updated_at
+          ) VALUES (?, ?, ?, 0, 1, 'spring', 1, 1, 30, 'active', 'foothill', '[]', '[]', 0, 1, ?, ?)`
         )
         .run(saveId, sessionId, seed, now, now);
 
@@ -308,6 +322,7 @@ export class GameService {
         sampleProtocol: definition.sampleProtocol,
         colors: definition.colors
       },
+      archive: this.getArchiveSummaries(saveId).get(speciesId) ?? null,
       states: states.map((state) => ({
         ...this.toSpeciesSnapshot(save, state, new Map()),
         siteId: state.siteId,
@@ -373,6 +388,13 @@ export class GameService {
       }
 
       const outcome = this.applyCommand(save, request.command);
+      const archiveUnlocks = this.syncArchiveUnlocks(save.id);
+      if (archiveUnlocks.length > 0) {
+        for (const unlock of archiveUnlocks) {
+          outcome.event.effects.push(`「${unlock.speciesName}」物种档案解锁阶段 ${unlock.stage}·${unlock.label}`);
+        }
+        outcome.event.payload = { ...outcome.event.payload, archiveUnlocks };
+      }
       save.revision += 1;
       this.updateSave(save);
       const sequenceRow = this.store.db
@@ -1136,14 +1158,10 @@ export class GameService {
     for (const row of sampleCounts) {
       sampleUsage.set(`${row.species_id}:${row.method}`, Number(row.used));
     }
-    const unlockCounts = this.store.db
-      .prepare(
-        `SELECT species_id, COUNT(*) AS count
-         FROM observations WHERE save_id = ? AND species_id IS NOT NULL
-         GROUP BY species_id`
-      )
-      .all(save.id) as unknown as Array<{ species_id: string; count: number }>;
-    const unlocked = new Set(unlockCounts.filter((row) => Number(row.count) >= 3).map((row) => row.species_id));
+    const archives = this.getArchiveSummaries(save.id);
+    const unlocked = new Set(
+      [...archives.values()].filter((archive) => archive.unlocked).map((archive) => archive.speciesId)
+    );
 
     const sites = SITES.map((site) => {
       const environment = siteMap.get(site.id) ?? generateSiteState(save.id, save.seed, save.year, save.season, save.day, site.id);
@@ -1207,6 +1225,7 @@ export class GameService {
       currentSiteId: save.current_site_id,
       restorationUnlocked: Boolean(save.restoration_unlocked),
       sites,
+      archives: [...archives.values()],
       recentEvents,
       seasonReview: seasonSummaryRow ? parseJson<SeasonReview>(seasonSummaryRow.summary_json, null as unknown as SeasonReview) : null,
       annualReview: reportRow ? parseJson<AnnualReview>(reportRow.report_json, null as unknown as AnnualReview) : null
@@ -1306,6 +1325,12 @@ export class GameService {
         this.updateSave(row);
       }
     }
+    if (!row.archive_synced) {
+      // 兼容已有进度：把升级前的观察、采样和保护状态记录一次性回填为阶段解锁。
+      this.syncArchiveUnlocks(row.id);
+      row.archive_synced = 1;
+      this.updateSave(row);
+    }
     return row;
   }
 
@@ -1316,7 +1341,7 @@ export class GameService {
         `UPDATE saves SET
           revision = ?, year = ?, season = ?, day = ?, slot = ?, action_points = ?, phase = ?,
           current_site_id = ?, year_start_species_json = ?, year_start_sites_json = ?,
-          restoration_unlocked = ?, updated_at = ?
+          restoration_unlocked = ?, archive_synced = ?, updated_at = ?
          WHERE id = ?`
       )
       .run(
@@ -1331,6 +1356,7 @@ export class GameService {
         save.year_start_species_json,
         save.year_start_sites_json,
         save.restoration_unlocked,
+        save.archive_synced,
         save.updated_at,
         save.id
       );
@@ -1472,6 +1498,124 @@ export class GameService {
           .get(saveId, year, season, speciesId, method) as unknown as { count: number }
       ).count
     );
+  }
+
+  /**
+   * 汇总每个物种的四项档案维度：观察次数、采样记录、
+   * 区域可及（观察覆盖的不同区域数）和保护状态（观察覆盖种群出现过的不同状态数）。
+   */
+  private getArchiveMetrics(saveId: string): Map<string, ArchiveProgress> {
+    const metrics = new Map<string, ArchiveProgress>();
+    const ensure = (speciesId: string): ArchiveProgress => {
+      const existing = metrics.get(speciesId);
+      if (existing) {
+        return existing;
+      }
+      const created = emptyArchiveProgress();
+      metrics.set(speciesId, created);
+      return created;
+    };
+
+    const observationRows = this.store.db
+      .prepare(
+        `SELECT species_id, COUNT(*) AS observations, COUNT(DISTINCT site_id) AS sites
+         FROM observations
+         WHERE save_id = ? AND kind = 'plant' AND species_id IS NOT NULL
+         GROUP BY species_id`
+      )
+      .all(saveId) as unknown as Array<{ species_id: string; observations: number; sites: number }>;
+    for (const row of observationRows) {
+      const progress = ensure(row.species_id);
+      progress.observations = Number(row.observations);
+      progress.sites = Number(row.sites);
+    }
+
+    const sampleRows = this.store.db
+      .prepare('SELECT species_id, COUNT(*) AS samples FROM samples WHERE save_id = ? GROUP BY species_id')
+      .all(saveId) as unknown as Array<{ species_id: string; samples: number }>;
+    for (const row of sampleRows) {
+      ensure(row.species_id).samples = Number(row.samples);
+    }
+
+    const statusRows = this.store.db
+      .prepare(
+        `SELECT o.species_id AS species_id, COUNT(DISTINCT ss.status) AS statuses
+         FROM observations o
+         JOIN species_states ss
+           ON ss.save_id = o.save_id AND ss.year = o.year AND ss.site_id = o.site_id AND ss.species_id = o.species_id
+         WHERE o.save_id = ? AND o.kind = 'plant'
+         GROUP BY o.species_id`
+      )
+      .all(saveId) as unknown as Array<{ species_id: string; statuses: number }>;
+    for (const row of statusRows) {
+      ensure(row.species_id).statuses = Number(row.statuses);
+    }
+    return metrics;
+  }
+
+  /**
+   * 将已达成的阶段写入 species_archive_unlocks。
+   * 主键 (save_id, species_id, stage) 配合 INSERT OR IGNORE 保证并发或重复完成时
+   * 每个阶段只解锁一次；仅返回本次调用实际写入的解锁记录。
+   */
+  private syncArchiveUnlocks(saveId: string): ArchiveUnlock[] {
+    const metrics = this.getArchiveMetrics(saveId);
+    const unlockedRows = this.store.db
+      .prepare('SELECT species_id, MAX(stage) AS stage FROM species_archive_unlocks WHERE save_id = ? GROUP BY species_id')
+      .all(saveId) as unknown as Array<{ species_id: string; stage: number }>;
+    const recordedStage = new Map(unlockedRows.map((row) => [row.species_id, Number(row.stage)]));
+
+    const insert = this.store.db.prepare(
+      'INSERT OR IGNORE INTO species_archive_unlocks (save_id, species_id, stage, unlocked_at) VALUES (?, ?, ?, ?)'
+    );
+    const now = new Date().toISOString();
+    const newlyUnlocked: ArchiveUnlock[] = [];
+    for (const definition of SPECIES_BY_ID.values()) {
+      const progress = metrics.get(definition.id) ?? emptyArchiveProgress();
+      const goals = getArchiveStageGoals(definition);
+      const completed = evaluateArchiveStage(goals, progress);
+      const recorded = recordedStage.get(definition.id) ?? 0;
+      for (let stage = recorded + 1; stage <= completed; stage += 1) {
+        const result = insert.run(saveId, definition.id, stage, now);
+        if (Number(result.changes) > 0) {
+          newlyUnlocked.push({
+            speciesId: definition.id,
+            speciesName: definition.name,
+            stage,
+            label: goals.find((goal) => goal.stage === stage)?.label ?? `阶段 ${stage}`
+          });
+        }
+      }
+    }
+    return newlyUnlocked;
+  }
+
+  private getArchiveSummaries(saveId: string): Map<string, SpeciesArchiveSummary> {
+    const metrics = this.getArchiveMetrics(saveId);
+    const unlockedRows = this.store.db
+      .prepare('SELECT species_id, MAX(stage) AS stage FROM species_archive_unlocks WHERE save_id = ? GROUP BY species_id')
+      .all(saveId) as unknown as Array<{ species_id: string; stage: number }>;
+    const recordedStage = new Map(unlockedRows.map((row) => [row.species_id, Number(row.stage)]));
+
+    const summaries = new Map<string, SpeciesArchiveSummary>();
+    for (const definition of SPECIES_BY_ID.values()) {
+      const stage = recordedStage.get(definition.id) ?? 0;
+      summaries.set(definition.id, {
+        speciesId: definition.id,
+        stage,
+        maxStage: ARCHIVE_MAX_STAGE,
+        unlocked: stage >= 1,
+        progress: metrics.get(definition.id) ?? emptyArchiveProgress(),
+        goals: getArchiveStageGoals(definition).map((goal) => ({
+          stage: goal.stage,
+          key: goal.key,
+          label: goal.label,
+          requirements: goal.requirements,
+          met: goal.stage <= stage
+        }))
+      });
+    }
+    return summaries;
   }
 }
 
