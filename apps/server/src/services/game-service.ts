@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import type {
   AnnualReview,
+  ArchiveStage,
   GameCommand,
   GamePhase,
   JournalEntry,
@@ -9,16 +10,19 @@ import type {
   Season,
   SeasonReview,
   SiteId,
+  SpeciesArchiveProgress,
   SpeciesSnapshot,
   WorldSnapshot
 } from '@shanhai/contracts';
-import { SEASON_LABELS } from '@shanhai/contracts';
+import { ARCHIVE_STAGES, ARCHIVE_STAGE_LABELS, SEASON_LABELS } from '@shanhai/contracts';
 import {
   applyOverwinter,
   applySampleEffects,
   CATALOG_VERSION,
   createSpeciesState,
   disperseSpecies,
+  EMPTY_ARCHIVE_METRICS,
+  evaluateArchiveStages,
   evaluateSample,
   evolveSeason,
   generateSiteState,
@@ -26,11 +30,14 @@ import {
   getPlantPresentation,
   getStatus,
   getSuitability,
+  highestUnlockedStage,
   nextSeason,
   round,
+  SPECIES,
   SPECIES_BY_ID,
   SITES,
   SITES_BY_ID,
+  type ArchiveMetrics,
   type SiteState,
   type SpeciesState
 } from '@shanhai/game-core';
@@ -102,6 +109,25 @@ interface EventDraft {
 interface CommandOutcome {
   event: EventDraft;
   evaluation?: unknown;
+}
+
+interface ArchiveUnlockRow {
+  species_id: string;
+  stage: string;
+  unlocked_at: string;
+}
+
+export interface ArchiveStageUnlock {
+  speciesId: string;
+  speciesName: string;
+  stage: ArchiveStage;
+  stageLabel: string;
+  requirements: string[];
+}
+
+interface ArchiveSyncResult {
+  progress: Map<string, SpeciesArchiveProgress>;
+  newlyUnlocked: ArchiveStageUnlock[];
 }
 
 interface SessionRecord {
@@ -296,6 +322,8 @@ export class GameService {
       })
       .filter((change): change is NonNullable<typeof change> => change !== null);
 
+    const archive = this.syncArchiveProgress(save).progress.get(speciesId) ?? lockedArchiveProgress();
+
     return {
       species: {
         id: definition.id,
@@ -308,8 +336,10 @@ export class GameService {
         sampleProtocol: definition.sampleProtocol,
         colors: definition.colors
       },
+      archive,
+      unlocked: isArchiveUnlocked(archive),
       states: states.map((state) => ({
-        ...this.toSpeciesSnapshot(save, state, new Map()),
+        ...this.toSpeciesSnapshot(save, state, new Map(), archive),
         siteId: state.siteId,
         siteName: SITES_BY_ID.get(state.siteId)?.name ?? state.siteId
       })),
@@ -375,35 +405,37 @@ export class GameService {
       const outcome = this.applyCommand(save, request.command);
       save.revision += 1;
       this.updateSave(save);
+      const archiveSync = this.syncArchiveProgress(save);
       const sequenceRow = this.store.db
         .prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM game_events WHERE save_id = ?')
         .get(saveId) as unknown as { sequence: number };
+      let nextSequence = Number(sequenceRow.sequence);
       const event: RecentEvent = {
         id: randomUUID(),
-        sequence: Number(sequenceRow.sequence),
+        sequence: nextSequence,
         type: outcome.event.type,
         message: outcome.event.message,
         effects: outcome.event.effects,
         createdAt: new Date().toISOString()
       };
-      this.store.db
-        .prepare(
-          `INSERT INTO game_events
-           (id, save_id, sequence, type, message, effects_json, payload_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          event.id,
+      this.insertEvent(saveId, event, outcome.event.payload);
+      for (const unlock of archiveSync.newlyUnlocked) {
+        nextSequence += 1;
+        this.insertEvent(
           saveId,
-          event.sequence,
-          event.type,
-          event.message,
-          JSON.stringify(event.effects),
-          JSON.stringify(outcome.event.payload),
-          event.createdAt
+          {
+            id: randomUUID(),
+            sequence: nextSequence,
+            type: 'ARCHIVE_STAGE',
+            message: `物种档案阶段解锁：${unlock.speciesName}「${unlock.stageLabel}」`,
+            effects: unlock.requirements.map((requirement) => `达成：${requirement}`),
+            createdAt: new Date().toISOString()
+          },
+          { speciesId: unlock.speciesId, stage: unlock.stage }
         );
+      }
 
-      const world = this.buildWorld(save);
+      const world = this.buildWorld(save, archiveSync.progress);
       const response = { world, event, evaluation: outcome.evaluation ?? null };
       this.store.db
         .prepare(
@@ -1114,7 +1146,175 @@ export class GameService {
     };
   }
 
-  private buildWorld(save: SaveRecord): WorldSnapshot {
+  /**
+   * 聚合观察次数、采样记录、区域可及与当前保护状态，
+   * 评估各物种的阶段目标，并把新达成的阶段持久化（只解锁一次）。
+   * 在事务内调用：主键约束加 INSERT OR IGNORE，并发完成也只会写入一行。
+   */
+  private syncArchiveProgress(save: SaveRecord): ArchiveSyncResult {
+    const metricsBySpecies = this.getArchiveMetrics(save);
+    const persistedRows = this.store.db
+      .prepare('SELECT species_id, stage, unlocked_at FROM species_archive_unlocks WHERE save_id = ?')
+      .all(save.id) as unknown as ArchiveUnlockRow[];
+    const persisted = new Map<string, string>();
+    for (const row of persistedRows) {
+      persisted.set(`${row.species_id}:${row.stage}`, row.unlocked_at);
+    }
+
+    const progress = new Map<string, SpeciesArchiveProgress>();
+    const newlyUnlocked: ArchiveStageUnlock[] = [];
+    const now = new Date().toISOString();
+
+    for (const definition of SPECIES) {
+      const evaluated = evaluateArchiveStages(definition, metricsBySpecies.get(definition.id) ?? EMPTY_ARCHIVE_METRICS);
+      const stages = evaluated.map((stageProgress) => {
+        const key = `${definition.id}:${stageProgress.stage}`;
+        const unlockedAt = persisted.get(key) ?? null;
+        return { ...stageProgress, unlocked: stageProgress.unlocked || unlockedAt !== null, unlockedAt };
+      });
+
+      for (const stageProgress of stages) {
+        const key = `${definition.id}:${stageProgress.stage}`;
+        if (!stageProgress.unlocked || persisted.has(key)) {
+          continue;
+        }
+        const result = this.store.db
+          .prepare(
+            `INSERT OR IGNORE INTO species_archive_unlocks (save_id, species_id, stage, source, unlocked_at)
+             VALUES (?, ?, ?, 'rule', ?)`
+          )
+          .run(save.id, definition.id, stageProgress.stage, now);
+        if (Number(result.changes) > 0) {
+          persisted.set(key, now);
+          stageProgress.unlockedAt = now;
+          newlyUnlocked.push({
+            speciesId: definition.id,
+            speciesName: definition.name,
+            stage: stageProgress.stage,
+            stageLabel: stageProgress.label,
+            requirements: stageProgress.requirements
+              .filter((requirement) => requirement.met)
+              .map(
+                (requirement) =>
+                  `${requirement.label} ${Math.min(requirement.current, requirement.target)}/${requirement.target}`
+              )
+          });
+        }
+      }
+
+      const stage = highestUnlockedStage(stages);
+      progress.set(definition.id, {
+        stage,
+        stageLabel: stage ? ARCHIVE_STAGE_LABELS[stage] : '未建档',
+        stages
+      });
+    }
+
+    return { progress, newlyUnlocked };
+  }
+
+  private getArchiveMetrics(save: SaveRecord): Map<string, ArchiveMetrics> {
+    const metrics = new Map<string, ArchiveMetrics>();
+    for (const definition of SPECIES) {
+      metrics.set(definition.id, { ...EMPTY_ARCHIVE_METRICS });
+    }
+
+    const observationRows = this.store.db
+      .prepare(
+        `SELECT species_id, COUNT(*) AS observation_count
+         FROM observations
+         WHERE save_id = ? AND species_id IS NOT NULL
+         GROUP BY species_id`
+      )
+      .all(save.id) as unknown as Array<{ species_id: string; observation_count: number }>;
+    for (const row of observationRows) {
+      const entry = metrics.get(row.species_id);
+      if (entry) {
+        entry.observationCount = Number(row.observation_count);
+      }
+    }
+
+    const siteUnionRows = this.store.db
+      .prepare(
+        `SELECT species_id, COUNT(DISTINCT site_id) AS site_count FROM (
+           SELECT species_id, site_id FROM observations
+           WHERE save_id = ? AND species_id IS NOT NULL
+           UNION
+           SELECT species_id, site_id FROM samples WHERE save_id = ?
+         )
+         GROUP BY species_id`
+      )
+      .all(save.id, save.id) as unknown as Array<{ species_id: string; site_count: number }>;
+    for (const row of siteUnionRows) {
+      const entry = metrics.get(row.species_id);
+      if (entry) {
+        entry.recordedSiteCount = Number(row.site_count);
+      }
+    }
+
+    const sampleRows = this.store.db
+      .prepare(
+        `SELECT species_id,
+                COUNT(*) AS sample_count,
+                COALESCE(SUM(CASE WHEN protocol_match = 1 THEN 1 ELSE 0 END), 0) AS protocol_count,
+                COALESCE(SUM(CASE WHEN protocol_match = 0 THEN 1 ELSE 0 END), 0) AS incorrect_count,
+                COALESCE(SUM(CASE WHEN method = 'photo' THEN 1 ELSE 0 END), 0) AS photo_count,
+                COUNT(DISTINCT method) AS method_count
+         FROM samples
+         WHERE save_id = ?
+         GROUP BY species_id`
+      )
+      .all(save.id) as unknown as Array<{
+      species_id: string;
+      sample_count: number;
+      protocol_count: number;
+      incorrect_count: number;
+      photo_count: number;
+      method_count: number;
+    }>;
+    for (const row of sampleRows) {
+      const entry = metrics.get(row.species_id);
+      if (entry) {
+        entry.sampleCount = Number(row.sample_count);
+        entry.protocolSampleCount = Number(row.protocol_count);
+        entry.incorrectSampleCount = Number(row.incorrect_count);
+        entry.photoSampleCount = Number(row.photo_count);
+        entry.distinctSampleMethods = Number(row.method_count);
+      }
+    }
+
+    for (const state of this.getSpeciesStates(save.id, save.year)) {
+      if (state.status === 'endangered') {
+        const entry = metrics.get(state.speciesId);
+        if (entry) {
+          entry.endangeredSiteCount += 1;
+        }
+      }
+    }
+
+    return metrics;
+  }
+
+  private insertEvent(saveId: string, event: RecentEvent, payload: Record<string, unknown>): void {
+    this.store.db
+      .prepare(
+        `INSERT INTO game_events
+         (id, save_id, sequence, type, message, effects_json, payload_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        event.id,
+        saveId,
+        event.sequence,
+        event.type,
+        event.message,
+        JSON.stringify(event.effects),
+        JSON.stringify(payload),
+        event.createdAt
+      );
+  }
+
+  private buildWorld(save: SaveRecord, archiveProgress?: Map<string, SpeciesArchiveProgress>): WorldSnapshot {
     const siteStates = this.getSiteStates(save.id, save.year);
     const speciesStates = this.getSpeciesStates(save.id, save.year);
     const siteMap = new Map(siteStates.map((state) => [state.siteId, state]));
@@ -1136,23 +1336,20 @@ export class GameService {
     for (const row of sampleCounts) {
       sampleUsage.set(`${row.species_id}:${row.method}`, Number(row.used));
     }
-    const unlockCounts = this.store.db
-      .prepare(
-        `SELECT species_id, COUNT(*) AS count
-         FROM observations WHERE save_id = ? AND species_id IS NOT NULL
-         GROUP BY species_id`
-      )
-      .all(save.id) as unknown as Array<{ species_id: string; count: number }>;
-    const unlocked = new Set(unlockCounts.filter((row) => Number(row.count) >= 3).map((row) => row.species_id));
+    const archive = archiveProgress ?? this.syncArchiveProgress(save).progress;
 
     const sites = SITES.map((site) => {
       const environment = siteMap.get(site.id) ?? generateSiteState(save.id, save.seed, save.year, save.season, save.day, site.id);
       const states = (speciesBySite.get(site.id) ?? [])
         .filter((state) => state.population > 1)
-        .map((state) => ({
-          ...this.toSpeciesSnapshot(save, state, sampleUsage),
-          unlocked: unlocked.has(state.speciesId)
-        }))
+        .map((state) =>
+          this.toSpeciesSnapshot(
+            save,
+            state,
+            sampleUsage,
+            archive.get(state.speciesId) ?? lockedArchiveProgress()
+          )
+        )
         .sort((left, right) => right.population - left.population);
       return {
         id: site.id,
@@ -1213,7 +1410,12 @@ export class GameService {
     };
   }
 
-  private toSpeciesSnapshot(save: SaveRecord, state: SpeciesState, sampleUsage: Map<string, number>): SpeciesSnapshot {
+  private toSpeciesSnapshot(
+    save: SaveRecord,
+    state: SpeciesState,
+    sampleUsage: Map<string, number>,
+    archive: SpeciesArchiveProgress
+  ): SpeciesSnapshot {
     const definition = SPECIES_BY_ID.get(state.speciesId);
     if (!definition) {
       throw new Error(`Missing species definition ${state.speciesId}`);
@@ -1259,7 +1461,8 @@ export class GameService {
         bloomEndDay: effectivePhenology?.end ?? state.phenology.bloomEndDay
       },
       sampleLimits,
-      unlocked: false
+      unlocked: isArchiveUnlocked(archive),
+      archive
     };
     return publicSnapshot;
   }
@@ -1591,6 +1794,24 @@ function worstStatus(left: string, right: string): string {
     absent: 4
   };
   return (severity[right] ?? 1) > (severity[left] ?? 1) ? right : left;
+}
+
+function isArchiveUnlocked(archive: SpeciesArchiveProgress): boolean {
+  return archive.stage === 'documented' || archive.stage === 'complete';
+}
+
+function lockedArchiveProgress(): SpeciesArchiveProgress {
+  return {
+    stage: null,
+    stageLabel: '未建档',
+    stages: ARCHIVE_STAGES.map((stage) => ({
+      stage,
+      label: ARCHIVE_STAGE_LABELS[stage],
+      unlocked: false,
+      unlockedAt: null,
+      requirements: []
+    }))
+  };
 }
 
 export { CATALOG_VERSION };

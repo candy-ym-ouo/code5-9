@@ -172,7 +172,12 @@ export function PlayPage() {
                       <h2>{selectedSpecies.name}</h2>
                       <p><i>{selectedSpecies.latinName}</i> · 当前可见形态颜色 <span className="inline-color" style={{ background: selectedSpecies.phenology.dominantColor }} /></p>
                     </div>
-                    {selectedSpecies.protected && <span className="protected-badge">保护物种</span>}
+                    <div className="sheet-badges">
+                      {selectedSpecies.protected && <span className="protected-badge">保护物种</span>}
+                      <span className={`archive-badge archive-stage-${selectedSpecies.archive.stage ?? 'locked'}`}>
+                        档案 · {selectedSpecies.archive.stageLabel}
+                      </span>
+                    </div>
                   </div>
                   <ObservationForm
                     key={`${selectedSpecies.id}-${world.revision}`}

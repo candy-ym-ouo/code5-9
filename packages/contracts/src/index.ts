@@ -28,6 +28,64 @@ export type LeafTexture = (typeof LEAF_TEXTURES)[number];
 export const SAMPLE_METHODS = ['photo', 'rubbing', 'litter', 'cutting'] as const;
 export type SampleMethod = (typeof SAMPLE_METHODS)[number];
 
+export const ARCHIVE_STAGES = ['encountered', 'documented', 'complete'] as const;
+export type ArchiveStage = (typeof ARCHIVE_STAGES)[number];
+
+export const ARCHIVE_STAGE_LABELS: Record<ArchiveStage, string> = {
+  encountered: '初见记录',
+  documented: '观察建档',
+  complete: '完整档案'
+};
+
+export interface ArchiveRequirementProgress {
+  key: string;
+  label: string;
+  current: number;
+  target: number;
+  met: boolean;
+}
+
+export interface ArchiveStageProgress {
+  stage: ArchiveStage;
+  label: string;
+  unlocked: boolean;
+  unlockedAt: string | null;
+  requirements: ArchiveRequirementProgress[];
+}
+
+export interface SpeciesArchiveProgress {
+  stage: ArchiveStage | null;
+  stageLabel: string;
+  stages: ArchiveStageProgress[];
+}
+
+export interface SpeciesDetailResponse {
+  species: {
+    id: string;
+    name: string;
+    latinName: string;
+    lifeForm: string;
+    description: string;
+    protected: boolean;
+    preferred: Record<string, number>;
+    sampleProtocol: SampleMethod[];
+    colors: Record<string, string>;
+  };
+  archive: SpeciesArchiveProgress;
+  unlocked: boolean;
+  states: Array<SpeciesSnapshot & { siteId: SiteId; siteName: string }>;
+  observations: Array<{
+    id: string;
+    season: string;
+    year: number;
+    day: number;
+    score: number;
+    values: Record<string, unknown>;
+    feedback: Record<string, unknown>;
+  }>;
+  history: Array<Record<string, unknown>>;
+}
+
 const ObservationValuesSchema = z.object({
   phenology: z.enum(PHENOLOGY_STAGES),
   leafTexture: z.enum(LEAF_TEXTURES),
@@ -143,6 +201,7 @@ export interface SpeciesSnapshot {
   };
   sampleLimits: Record<SampleMethod, { used: number; limit: number; allowed: boolean; reason?: string }>;
   unlocked: boolean;
+  archive: SpeciesArchiveProgress;
 }
 
 export interface RecentEvent {

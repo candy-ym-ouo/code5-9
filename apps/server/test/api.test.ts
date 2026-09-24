@@ -64,7 +64,7 @@ describe('closed-loop API', () => {
         note: '自动化闭环观察'
       }
     });
-    expect(world.recentEvents[0]?.type).toBe('OBSERVE_PLANT');
+    expect(world.recentEvents.some((event) => event.type === 'OBSERVE_PLANT')).toBe(true);
 
     const beforeSample = world.sites
       .flatMap((site) => site.species)

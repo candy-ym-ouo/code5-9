@@ -162,6 +162,15 @@ CREATE TABLE IF NOT EXISTS command_receipts (
   PRIMARY KEY(save_id, idempotency_key)
 );
 
+CREATE TABLE IF NOT EXISTS species_archive_unlocks (
+  save_id TEXT NOT NULL REFERENCES saves(id) ON DELETE CASCADE,
+  species_id TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'rule',
+  unlocked_at TEXT NOT NULL,
+  PRIMARY KEY (save_id, species_id, stage)
+);
+
 CREATE TABLE IF NOT EXISTS save_exports (
   id TEXT PRIMARY KEY,
   save_id TEXT NOT NULL REFERENCES saves(id) ON DELETE CASCADE,
@@ -171,4 +180,9 @@ CREATE TABLE IF NOT EXISTS save_exports (
 );
 
 CREATE INDEX IF NOT EXISTS idx_exports_save ON save_exports(save_id);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  key TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
 `;

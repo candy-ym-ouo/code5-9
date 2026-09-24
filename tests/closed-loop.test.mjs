@@ -61,6 +61,10 @@ try {
       note: '端到端闭环观察'
     }
   });
+  const observed = world.sites.flatMap((site) => site.species).find((species) => species.id === 'prunus-davidiana');
+  assert.equal(observed.archive.stage, 'encountered');
+  assert.equal(observed.archive.stages.length, 3);
+  assert.ok(world.recentEvents.some((event) => event.type === 'ARCHIVE_STAGE' && event.message.includes('初见记录')));
   await send({ type: 'TAKE_SAMPLE', speciesId: 'prunus-davidiana', method: 'litter' });
 
   for (const expectedSeason of ['spring', 'summer', 'autumn', 'winter']) {

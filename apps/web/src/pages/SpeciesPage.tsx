@@ -37,11 +37,41 @@ export function SpeciesPage() {
         <div>
           <p className="dossier-description">{detail.data.species.description}</p>
           <dl className="dossier-facts">
+            <div><dt>档案阶段</dt><dd>{detail.data.archive.stageLabel}</dd></div>
             <div><dt>保护状态</dt><dd>{detail.data.species.protected ? '禁止破坏性采集' : '常规观察对象'}</dd></div>
             <div><dt>适宜温度</dt><dd>{detail.data.species.preferred.temperatureC}°C</dd></div>
             <div><dt>适宜湿度</dt><dd>{detail.data.species.preferred.humidity}%</dd></div>
             <div><dt>推荐采集</dt><dd>{detail.data.species.sampleProtocol.join('、')}</dd></div>
           </dl>
+        </div>
+      </section>
+
+      <section className="document-section">
+        <div className="section-heading">
+          <div><p className="eyebrow">ARCHIVE STAGES</p><h2>档案阶段目标</h2></div>
+          <span>观察次数、采样记录、区域可及与保护状态共同决定阶段解锁</span>
+        </div>
+        <div className="archive-stage-grid">
+          {detail.data.archive.stages.map((stage) => (
+            <article key={stage.stage} className={`archive-stage-card ${stage.unlocked ? 'unlocked' : ''}`}>
+              <header>
+                <span className={`archive-stage-dot ${stage.unlocked ? 'on' : ''}`} aria-hidden="true" />
+                <strong>{stage.label}</strong>
+                <small>{stage.unlocked ? '已解锁' : '未解锁'}</small>
+              </header>
+              <ul>
+                {stage.requirements.map((requirement) => (
+                  <li key={requirement.key} className={requirement.met ? 'met' : ''}>
+                    <span>{requirement.label}</span>
+                    <strong>
+                      {requirement.met ? '✓ ' : ''}
+                      {Math.min(requirement.current, requirement.target)}/{requirement.target}
+                    </strong>
+                  </li>
+                ))}
+              </ul>
+            </article>
+          ))}
         </div>
       </section>
 

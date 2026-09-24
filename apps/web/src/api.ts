@@ -7,7 +7,7 @@ import type {
   JournalEntry,
   Season,
   SiteId,
-  SpeciesSnapshot,
+  SpeciesDetailResponse,
   WorldSnapshot
 } from '@shanhai/contracts';
 
@@ -74,30 +74,7 @@ export const api = {
     return request<{ entries: JournalEntry[] }>(`/api/save/${saveId}/journal${suffix}`);
   },
   getSpecies: (saveId: string, speciesId: string) =>
-    request<{
-      species: {
-        id: string;
-        name: string;
-        latinName: string;
-        lifeForm: string;
-        description: string;
-        protected: boolean;
-        preferred: Record<string, number>;
-        sampleProtocol: string[];
-        colors: Record<string, string>;
-      };
-      states: Array<SpeciesSnapshot & { siteId: SiteId; siteName: string }>;
-      observations: Array<{
-        id: string;
-        season: string;
-        year: number;
-        day: number;
-        score: number;
-        values: Record<string, unknown>;
-        feedback: Record<string, unknown>;
-      }>;
-      history: Array<Record<string, unknown>>;
-    }>(`/api/save/${saveId}/species/${speciesId}`),
+    request<SpeciesDetailResponse>(`/api/save/${saveId}/species/${speciesId}`),
   getReport: (saveId: string, year: number) =>
     request<AnnualReview>(`/api/save/${saveId}/report/${year}`),
   exportSave: (saveId: string) =>
